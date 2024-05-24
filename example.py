@@ -12,8 +12,8 @@ args = parser.parse_args()
 snr =  args.snr
 #data_raw = np.loadtxt('1735-0724_20cmWBC_oct05.txt', comments='F')
 data_raw = np.loadtxt('data.dat', comments='F')
-channels = np.int(data_raw[-1,1]) + 1
-bins = np.int(data_raw[-1,2]) + 1
+channels = int(data_raw[-1,1]) + 1
+bins = int(data_raw[-1,2]) + 1
 print('channels and bins in file:', channels, bins)
 idx = 0
 bflux = np.zeros((channels))
@@ -22,22 +22,22 @@ for chan in np.arange(channels):
     print('################## Channel ', chan, '##################')
     data = data_raw[idx:idx+bins,3]
     rawx = np.arange(len(data))
-    margin = np.int(len(data)/20)
+    margin = int(len(data)/20)
     mcmc = False
     #mcmc = True
     #rotate the data to centre the peak
     binmax = np.argmax(data)
-    shift = np.int(len(data)/2 - binmax)
+    shift = int(len(data)/2 - binmax)
     profile = np.roll(data, shift)
-    std, left, right, mu = ps.pulseshape(profile,snr,mcmc)
-    bflux[chan], errorflux[chan] = ps.getflux(profile,np.int(left),np.int(right),std)
-    #baseline =  np.mean((np.mean(profile[0:np.int(left)]),np.mean(profile[np.int(right):-1])))
+    classicnoise, std, residualnoise, left, right, mu = ps.pulseshape(profile,snr,mcmc)
+    bflux[chan], errorflux[chan] = ps.getflux(profile,int(left),int(right),std)
+    #baseline =  np.mean((np.mean(profile[0:int(left)]),np.mean(profile[int(right):-1])))
     print('flux: ', bflux[chan], 'mJy' )
     w50, w50p, w50n = ps.get_wX(mu, std, 50)
     w10, w10p, w10n = ps.get_wX(mu, std, 10)
     w5, w5p, w5n = ps.get_wX(mu, std, 5)
     w1, w1p, w1n = ps.get_wX(mu, std, 1)
-    print('noise: ', std)
+    print('classic, gp noise, residual: ', classicnoise, std, residualnoise)
     print(w50, w10, w5, w1)
     print('size of mu: ', len(mu))
     if w50 + w50p < right - left + 1 :

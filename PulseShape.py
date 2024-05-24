@@ -3,15 +3,16 @@
 
 # Import stuff
 import numpy as np
+from numpy import ma
 from matplotlib import pyplot as plt
 import george
 from george import kernels
 import emcee
+import corner
 import scipy.optimize as op
 
-
 # ## Define all functions
-def get_gp(profile):
+def get_gp(y,mynoise):
     # Define the objective function (negative log-likelihood in this case).
     def nll(p):
         gp.set_parameter_vector(p)
@@ -23,19 +24,14 @@ def get_gp(profile):
         gp.set_parameter_vector(p)
         return -gp.grad_log_likelihood(y, quiet=True)
     
-    kernel = 1.0 * kernels.ExpSquaredKernel(metric=10)
-    y = profile
-    noise_start = np.std(profile[0:50])
-    #    print('noise start: ', noise_start)
-    t0 = np.arange(len(profile))
-    t = t0
+    kernel = np.var(y) * kernels.ExpSquaredKernel(metric=10)
+    t = np.arange(len(y))
     gp = george.GP(kernel, mean=np.mean(y), fit_mean=True,
-                   white_noise=np.log(noise_start), fit_white_noise=True)
+                   white_noise=np.log(mynoise**2),
+                   fit_white_noise=True)
     # You need to compute the GP once before starting the optimization.
     gp.compute(t)
     
-    # Print the initial ln-likelihood.
-    #    print(gp.log_likelihood(y))
 
     # Run the optimization routine.
     p0 = gp.get_parameter_vector()
@@ -43,33 +39,32 @@ def get_gp(profile):
     
     # Update the kernel and print the final log-likelihood.
     gp.set_parameter_vector(results.x)
+    print(gp.get_parameter_names())
     return gp
 
-def get_boundaries(mu, noise, snr):
+def get_boundaries(mu, mynoise, snr):
     bins = len(mu)
     left = bins
     right = 0
     index = 0
+    threshold = snr*mynoise
     
-    #    print('noise: ', noise)
-    #    baseline = np.min(mu)
     baseline = 0.0
     while left == bins and index < bins:
-        if mu[index] - baseline > snr * noise and \
-           mu[index+1] - baseline > snr * noise and \
-           mu[index+2] - baseline > snr * noise and \
-           mu[index+3] - baseline > snr * noise:
+        if mu[index] - baseline > threshold and \
+           mu[index+1] - baseline > threshold and \
+           mu[index+2] - baseline > threshold and \
+           mu[index+3] - baseline > threshold:
             left = index
         index += 1
     index = 1
     while right == 0 and index < bins:
-        if mu[-index] - baseline > snr * noise and\
-           mu[-(index+1)] - baseline > snr * noise and\
-           mu[-(index+2)] - baseline > snr * noise and\
-           mu[-(index+3)] - baseline > snr * noise:
+        if mu[-index] - baseline > threshold and\
+           mu[-(index+1)] - baseline > threshold and\
+           mu[-(index+2)] - baseline > threshold and\
+           mu[-(index+3)] - baseline > threshold:
             right = bins - index
         index += 1
-
     return left, right
 
 def get_wX(mu, rms, X):
@@ -124,35 +119,88 @@ def get_wX(mu, rms, X):
     wXp = right1n - left1n - wX + 1
     wXn = right1p - left1p - wX + 1
     return wX, wXp, wXn
-     
+def minirms(myprofile,segments):
+    rms16 = np.zeros((segments))
+    seglength = int(len(myprofile)/segments)
+    for i in np.arange(segments):
+        rms16[i] = np.std(myprofile[i*seglength:(i+1)*seglength])
+    min16 = np.min(rms16)
+    return min16
+
+def is_outlier(points, thresh=6):
+    """
+    Returns a boolean array with True if points are outliers and False 
+    otherwise.
+
+    Parameters:
+    -----------
+        points : An numobservations by numdimensions array of observations
+        thresh : The modified z-score to use as a threshold. Observations with
+            a modified z-score (based on the median absolute deviation) greater
+            than this value will be classified as outliers.
+
+    Returns:
+    --------
+        mask : A numobservations-length boolean array.
+
+    References:
+    ----------
+        Boris Iglewicz and David Hoaglin (1993), "Volume 16: How to Detect and
+        Handle Outliers", The ASQC Basic References in Quality Control:
+        Statistical Techniques, Edward F. Mykytka, Ph.D., Editor. 
+    """
+    if len(points.shape) == 1:
+        points = points[:,None]
+    median = np.median(points, axis=0)
+    diff = np.sum((points - median)**2, axis=-1)
+    diff = np.sqrt(diff)
+    med_abs_deviation = np.median(diff)
+
+    modified_z_score = 0.6745 * diff / med_abs_deviation
+
+    return modified_z_score > thresh
 # ## Define the main callable function pulseshape(1D_data_array)
 def pulseshape(data,mysnr,mcmc):
     originalbins = len(data)
     # roll the profile to bring the peak to the centre
     binmax = np.argmax(data)
-    profile = np.roll(data, np.int(originalbins/2 - binmax))
-    noise_start = np.std(profile[0:50])
+    rollbins = -np.argmin(data)
+    #profile = np.roll(data, int(originalbins/4 - binmax))
+    profile = np.roll(data, rollbins)
+    #noise_start = np.std(profile[0:50])
+    noise_start = minirms(profile,16) 
+    print("noise start: ", noise_start)
     profile = profile/noise_start
-    margin = np.int(originalbins/10)
+    margin = int(originalbins/10)
     # in units of SNR from here
     
     # ## Start the GP 
 
-    gp1 = get_gp(profile)
+    gp1 = get_gp(profile,1.0)
 
     # ## Find a window of data around the pulse and produce noiseless data
     mu_b, var_b = gp1.predict(profile, np.arange(len(profile)), return_var=True)
-    #    print('First GP')
+    #profileout = np.roll(mu_b, -int(originalbins/4 - binmax))
+    profileout = np.roll(mu_b, -rollbins)
+    residual = data - profileout*noise_start
+    plt.show()
+    outlier_mask = is_outlier(residual,6.0)
+    mdata = ma.masked_array(residual, mask=outlier_mask)
+    # residual noise after outlier removal
+    residual_rms = mdata.std()
+    # GP noise
     noise = np.sqrt(np.exp(gp1.get_parameter_vector()[1]))
-    left, right = get_boundaries(mu_b, noise, mysnr)
+    min_noise = min((noise,residual_rms, noise_start))
+    print('Minimum estimate of noise is: ', min_noise)
+    left, right = get_boundaries(mu_b*noise_start, min_noise, mysnr)
     #    print('SNR boundaries found: ', left, right, noise)
     if right == 0 and left == originalbins:
         return 0,margin,originalbins-margin,np.zeros((originalbins))
     bins = right + margin - (left - margin) 
     #    print('boundaries: ', left, right)
     if left > margin and right < originalbins-margin:
-        base1 = np.int(left/2)
-        base2 = np.int(right + 0.5*(originalbins-right)) 
+        base1 = int(left/2)
+        base2 = int(right + 0.5*(originalbins-right)) 
         baseline = 0.5 * (np.mean(profile[0:base1]) + np.mean(profile[base2:]))
         std_baseline = 0.5 * (np.std(profile[0:base1]) + np.std(profile[base2:]))
     else:
@@ -161,11 +209,12 @@ def pulseshape(data,mysnr,mcmc):
     # ## Return the standard deviation of the noise, the left and
     # ## right pulse boundaries referring to the input array, and the
     # ## noiseless profile 
-    leftout = left - (originalbins/2 - binmax)
-    rightout = right - (originalbins/2 - binmax)
-    profileout = np.roll(mu_b, -np.int(originalbins/2 - binmax))
+    #leftout = left - (originalbins/4 - binmax)
+    #rightout = right - (originalbins/4 - binmax)
+    leftout = left - rollbins
+    rightout = right - rollbins
     if not mcmc:
-        return noise*noise_start, leftout, rightout, profileout*noise_start
+        return noise_start, noise*noise_start, residual_rms, leftout, rightout, profileout*noise_start
 
     # Get a more accurate noiseless profile with mcmc for hyperparameter exploration
     #    print('Off pulse baseline to subtract is: ', baseline, std_baseline)
@@ -199,6 +248,8 @@ def pulseshape(data,mysnr,mcmc):
     
     print("Running production chain")
     sampler.run_mcmc(p0, 200)
+    flat_samples = sampler.get_chain(discard=100, thin=15, flat=True)
+    fig = corner.corner(flat_samples);
     nsamples = 50
     allsamples  = np.zeros((nsamples, len(yn)))
     for i in range(nsamples):
@@ -212,20 +263,28 @@ def pulseshape(data,mysnr,mcmc):
         allsamples[i,:] = gp_last.sample_conditional(yn, t)
     noiseless=np.mean(allsamples,0)
     mu_b[left-min(left,margin):min(right+margin,len(profile))] = noiseless
-    profileout = np.roll(mu_b, -np.int(originalbins/2 - binmax))
-    return noise*noise_start, leftout, rightout, profileout*noise_start
+    #profileout = np.roll(mu_b, -int(originalbins/4 - binmax))
+    profileout = np.roll(mu_b, -rollbins)
+    residual = data - profileout*noise_start
+    residual_rms = np.std(residual)
+    return noise_start, noise*noise_start, residual_rms, leftout, rightout, profileout*noise_start
+
 #    plt.plot(t, yn, ".k")
 #    plt.plot(t, noiseless, "-b")
 #    plt.show()
 def getflux(profile,left,right, std):
     maskedprofile = np.copy(profile)
-#    maskedprofile[np.int(left):np.int(right)] = 0.0
-    sumprofile = np.sum(maskedprofile[np.int(left):np.int(right)])
+#    maskedprofile[int(left):int(right)] = 0.0
+    sumprofile = np.sum(maskedprofile[int(left):int(right)])
     sumall = np.sum(maskedprofile)
 
 #    baseline = np.mean(maskedprofile)
-    baseline = (sumall - sumprofile)/(len(profile)-(right-left+1)) 
-    errorflux =  np.sqrt(right-left+1)*std/np.float(len(profile))
-    flux = (np.sum(profile[left:right]) - baseline*(right-left))/np.float(len(profile))
+    denom = len(profile)-(right-left+1)
+    if denom == 0:
+        baseline = 0.0
+    else:
+        baseline = (sumall - sumprofile)/denom
+    errorflux =  np.sqrt(right-left+1)*std/float(len(profile))
+    flux = (np.sum(profile[left:right]) - baseline*(right-left))/float(len(profile))
     return flux, errorflux
 
